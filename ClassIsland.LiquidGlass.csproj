@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <OutputType>Library</OutputType>
+        <AssemblyName>ClassIsland.LiquidGlass</AssemblyName>
+        <RootNamespace>ClassIsland.LiquidGlass</RootNamespace>
+        <Version>1.0.0.0</Version>
+        <!-- 依赖一律用宿主已加载的那份，插件包里不能再带一份。 -->
+        <GenerateDependencyFile>false</GenerateDependencyFile>
+        <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+        <GenerateDocumentationFile>false</GenerateDocumentationFile>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!-- 库项目默认不把 NuGet 程序集复制到输出目录。Vortice 宿主里没有，
+             必须随插件包发，所以要显式打开。
+             其余依赖一律加了 ExcludeAssets="runtime"，不会被一起复制出来——
+             宿主已经加载过那些，插件包里再带一份会出现同名类型两个身份。 -->
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+        <NoWarn>$(NoWarn);CS1591;CA1416</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Avalonia" Version="11.3.17" ExcludeAssets="runtime" />
+        <PackageReference Include="FluentAvaloniaUI" Version="2.4.1" ExcludeAssets="runtime" />
+        <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1" ExcludeAssets="runtime" />
+        <!-- D3D11/DXGI 的托管绑定。纯 P/Invoke 包在 d3d11.dll、dxgi.dll 上，
+             这两个是系统组件，所以不带任何原生附属文件——只多几个托管 dll，
+             要随插件包一起发（宿主没有这几个，见 pack-include.txt）。 -->
+        <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
+        <PackageReference Include="Vortice.D3DCompiler" Version="3.6.2" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AvaloniaResource Include="Themes/**" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- 宿主程序集：编译期需要，运行期用宿主已加载的那份，所以不复制到输出目录。
+             主题模板要引用 ClassIsland.Controls.MainWindowLine，所以两个都得引。 -->
+        <ProjectReference Include="..\..\ClassIsland.Core\ClassIsland.Core.csproj"
+                          Private="false" ExcludeAssets="runtime" />
+        <ProjectReference Include="..\..\ClassIsland\ClassIsland.csproj"
+                          Private="false" ExcludeAssets="runtime" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="manifest.yml" CopyToOutputDirectory="PreserveNewest" />
+        <None Include="README.md" CopyToOutputDirectory="PreserveNewest" />
+        <None Include="icon.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('icon.png')" />
+    </ItemGroup>
+
+</Project>

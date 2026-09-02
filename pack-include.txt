@@ -1,0 +1,10 @@
+# 随插件包一起发的额外文件。
+# Vortice 是 D3D11/DXGI 的托管绑定，宿主里没有，必须自带；
+# 它只是对系统 dll 的 P/Invoke，不含原生附属文件。
+Vortice.Direct3D11.dll
+Vortice.DXGI.dll
+Vortice.DirectX.dll
+Vortice.D3DCompiler.dll
+Vortice.Mathematics.dll
+SharpGen.Runtime.dll
+SharpGen.Runtime.COM.dll

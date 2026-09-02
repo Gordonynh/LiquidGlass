@@ -1,0 +1,116 @@
+<ci:SettingsPageBase xmlns="https://github.com/avaloniaui"
+                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                     xmlns:ci="http://classisland.tech/schemas/xaml/core"
+                     xmlns:controls="clr-namespace:FluentAvalonia.UI.Controls;assembly=FluentAvalonia"
+                     x:Class="ClassIsland.LiquidGlass.Views.LiquidGlassSettingsPage">
+    <ScrollViewer>
+        <StackPanel Classes="settings-container animated-intro">
+
+            <TextBlock Classes="l-instructive" TextWrapping="Wrap"
+                       Text="把状态栏换成液态玻璃质感。折射的是状态栏背后实际显示的任何内容，不只是壁纸。只接管无通知时的状态栏，有通知时交回原本的样式。"/>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE9D9;}"
+                                       Header="当前状态"
+                                       Description="{Binding StatusText}"/>
+
+            <Separator Margin="0 12 0 4"/>
+            <ci:IconText Glyph="&#xE706;" Text="折射" Margin="0 0 0 4"/>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE706;}"
+                                       Header="启用折射"
+                                       Description="{Binding CaptureWarning}">
+                <controls:SettingsExpander.Footer>
+                    <ToggleSwitch IsChecked="{Binding Settings.UseGpu, Mode=TwoWay}"/>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE9A6;}"
+                                       Header="折射强度">
+                <controls:SettingsExpander.Footer>
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Slider Width="170" Minimum="0" Maximum="1" TickFrequency="0.05"
+                                IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Value="{Binding Settings.Lensing, Mode=TwoWay}"/>
+                        <TextBlock VerticalAlignment="Center" MinWidth="54" Text="{Binding LensingText}"/>
+                    </StackPanel>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE916;}"
+                                       Header="刷新率"
+                                       Description="背后是静态内容时调低几乎看不出差别，还省电。">
+                <controls:SettingsExpander.Footer>
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Slider Width="170" Minimum="5" Maximum="120" TickFrequency="5"
+                                IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Value="{Binding Settings.FrameRate, Mode=TwoWay}"/>
+                        <TextBlock VerticalAlignment="Center" MinWidth="54" Text="{Binding FrameRateText}"/>
+                    </StackPanel>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <Separator Margin="0 12 0 4"/>
+            <ci:IconText Glyph="&#xE80A;" Text="外观" Margin="0 0 0 4"/>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE80A;}"
+                                       Header="玻璃厚度"
+                                       Description="边缘倒角带有多宽。折射只发生在这条带里，中间是平的。">
+                <controls:SettingsExpander.Footer>
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Slider Width="170" Minimum="4" Maximum="28" TickFrequency="1"
+                                IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Value="{Binding Settings.Thickness, Mode=TwoWay}"/>
+                        <TextBlock VerticalAlignment="Center" MinWidth="54" Text="{Binding ThicknessText}"/>
+                    </StackPanel>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE7E8;}"
+                                       Header="两端做成半圆"
+                                       Description="状态栏是横条，胶囊比圆角矩形更像那么回事。">
+                <controls:SettingsExpander.Footer>
+                    <ToggleSwitch IsChecked="{Binding Settings.RoundToCapsule, Mode=TwoWay}"/>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE9E9;}"
+                                       Header="高光强度"
+                                       Description="调大容易过曝成一道白色描边，那正是廉价毛玻璃的样子。">
+                <controls:SettingsExpander.Footer>
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Slider Width="170" Minimum="0" Maximum="1" TickFrequency="0.02"
+                                IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Value="{Binding Settings.LightIntensity, Mode=TwoWay}"/>
+                        <TextBlock VerticalAlignment="Center" MinWidth="54" Text="{Binding LightText}"/>
+                    </StackPanel>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE945;}"
+                                       Header="光源方向">
+                <controls:SettingsExpander.Footer>
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Slider Width="170" Minimum="-180" Maximum="180" TickFrequency="5"
+                                IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Value="{Binding Settings.LightAngle, Mode=TwoWay}"/>
+                        <TextBlock VerticalAlignment="Center" MinWidth="54" Text="{Binding AngleText}"/>
+                    </StackPanel>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE790;}"
+                                       Header="边缘色散"
+                                       Description="红蓝在边缘错开一点点。过了就是廉价的彩边。">
+                <controls:SettingsExpander.Footer>
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Slider Width="170" Minimum="0" Maximum="0.2" TickFrequency="0.01"
+                                IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Value="{Binding Settings.Chromatic, Mode=TwoWay}"/>
+                        <TextBlock VerticalAlignment="Center" MinWidth="54" Text="{Binding ChromaticText}"/>
+                    </StackPanel>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+        </StackPanel>
+    </ScrollViewer>
+</ci:SettingsPageBase>

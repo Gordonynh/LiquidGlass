@@ -1,0 +1,11 @@
+entranceAssembly: ClassIsland.LiquidGlass.dll
+name: 液态玻璃
+id: gordon.liquidglass
+description: 把状态栏换成苹果液态玻璃质感。边缘曲率、镜面高光、菲涅耳边缘与色散由着色器实时计算，不是一层模糊加白色蒙版。可与像素流动同时启用：无通知时是玻璃，有通知时切回像素流动。
+version: 1.0.0.0
+apiVersion: 2.0.0.0
+author: GordonYoung
+icon: icon.png
+readme: README.md
+supportedOSPlatforms:
+  - Windows

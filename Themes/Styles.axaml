@@ -1,0 +1,51 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ci="http://classisland.tech/schemas/xaml/core"
+        xmlns:lg="using:ClassIsland.LiquidGlass.Rendering">
+
+    <!--
+        只改状态栏那块背景板，<b>不碰任何模板</b>。
+
+        走过一次弯路，记在这里免得再走：曾经以为 MainWindowLine 的
+        「精简模板」是无通知时用的，于是去覆盖它。其实
+        IsNotificationEnabled 是 MainWindowLineSettings 上的<b>每行开关</b>
+        （编辑模式里勾的「这一行显示通知」），默认为 True，
+        所以状态栏一直走完整模板，覆盖精简模板等于什么都没做——
+        而且主题加载失败是静默的，查起来毫无线索。
+
+        现在的做法是只给 Border.line-background 换内容：
+        把它自己的底色、描边、投影全去掉，塞一个玻璃进去。
+        通知那一整套仍在完整模板里、原样归像素流动管，
+        两个插件因此互不干涉。
+
+        ⚠ 主题按启用顺序依次叠加，后加的覆盖先加的。
+        要两个都生效，本主题必须排在「像素流动」之后启用。
+    -->
+
+    <Style Selector="Border.line-background">
+        <!--
+            ⚠ Opacity 必须一起覆盖，<b>这是最容易漏的一条</b>。
+            ClassIsland 自己的样式把这块背景板的 Opacity 绑在「主界面透明度」上
+            （MainWindowStylesAssist.BackgroundOpacity，默认 0.5）。
+            只覆盖底色不覆盖它，玻璃就是按半透明画上去的，背后的真实画面直接透过来：
+            屏幕上同时有一张清晰原图和一张被折射位移过的副本，
+            壁纸上看不出来，一开 APP 就是明显的重影——
+            看着像「折射的纹理被放大了很多倍、位置偏了」，其实是两张图叠在一起。
+
+            玻璃的通透感由着色器自己算（它采的就是背后的真实内容），
+            不需要、也不能再乘一层宿主的透明度。
+        -->
+        <Setter Property="Opacity" Value="1"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="BoxShadow" Value="none"/>
+        <!-- 用 Template 而不是直接给一个实例：Setter 的值是所有匹配控件共用的，
+             直接塞实例会让多行状态栏抢同一个控件。 -->
+        <Setter Property="Child">
+            <Template>
+                <lg:LiquidGlassBorder/>
+            </Template>
+        </Setter>
+    </Style>
+
+</Styles>
