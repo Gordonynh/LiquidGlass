@@ -71,6 +71,12 @@ internal sealed class GlassSource : IDisposable
     private ID3D11PixelShader? _cropPs;
     private ID3D11Buffer? _cropCb;
 
+    // 状态栏文字的掩膜。由宿主光栅化后交上来，着色器据此逐像素定文字黑白。
+    private ID3D11Texture2D? _mask;
+    private ID3D11ShaderResourceView? _maskSrv;
+    private int _maskW;
+    private int _maskH;
+
     private ID3D11Texture2D? _shared;
     private ID3D11RenderTargetView? _rtv;
     private IDXGIKeyedMutex? _mutex;
@@ -287,6 +293,15 @@ internal sealed class GlassSource : IDisposable
     /// <summary>桌面没变化时 AcquireNextFrame 的正常返回，不是故障。</summary>
     private const int DxgiWaitTimeout = unchecked((int)0x887A0027);
 
+    /// <summary>
+    /// 折射能够到的最远距离，以厚度的倍数计。
+    /// </summary>
+    /// <remarks>
+    /// 必须与 <c>GlassHlsl</c> 里 <c>gLensAmount * band</c>（band 即厚度） 一致：
+    /// 这个数同时决定裁剪留边要留多宽，留少了边缘会采到框外。
+    /// </remarks>
+    private const float DispReach = 2.0f;
+
     /// <summary>投影用的留边（设备像素）。纹理比胶囊本身大出这一圈。</summary>
     public int ShadowPad { get; private set; }
 
@@ -365,7 +380,14 @@ internal sealed class GlassSource : IDisposable
             BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource
         };
 
-        _crop = _device.CreateTexture2D(desc);
+        // ⚠ 裁剪图<b>必须带 mip 链</b>。主着色器用 SampleGrad 按实际采样足迹取样：
+        // 透镜把一大条背景压进边缘那几个像素时，靠 mip 预滤波才不会闪。
+        // 没有 mip 的话 SampleGrad 只能一直读 0 级，等于没做抗锯齿——
+        // 这正是从前要在边缘糊一遍的原因，而那一糊把压缩感也一起抹掉了。
+        var cropDesc = desc;
+        cropDesc.MipLevels = 0;                       // 0 = 一直生成到 1x1
+        cropDesc.MiscFlags = ResourceOptionFlags.GenerateMips;
+        _crop = _device.CreateTexture2D(cropDesc);
         _cropSrv = _device.CreateShaderResourceView(_crop);
         _cropRtv = _device.CreateRenderTargetView(_crop);
 
@@ -520,15 +542,14 @@ internal sealed class GlassSource : IDisposable
     /// <summary>把玻璃画进共享纹理。<paramref name="originPx"/> 是条形在桌面纹理里的物理左上角。</summary>
     public bool Render(Vector2 originPx, float radius, float thickness, float lensing,
         float scaling, bool isDark, float chromatic, float tintAmount, float shadowAlpha,
-        float clarity)
+        float clarity, float dimAmount, float lensAmount,
+        Vector2 maskOriginPx, bool adaptiveText, float polarSoft, float maskGain)
     {
         if (_shared is null || _rtv is null || _mutex is null)
         {
             return false;
         }
 
-        // 没抓到桌面就用占位纹理，并把折射关掉——但这一帧照样要画、照样要交还互斥。
-        var srv = _desktopSrv is null ? _blankSrv : _blurSrv;
         if (_desktopSrv is null)
         {
             lensing = 0f;
@@ -537,9 +558,32 @@ internal sealed class GlassSource : IDisposable
         // ---- 裁剪 + 两趟模糊 ----
         // 留边要盖住位移和模糊两者的取样范围，否则边缘会取到裁剪框外，
         // 出现一圈暗边或透明晕。
-        var sigma = Math.Min(0.45f * thickness, 12f);
-        var pad = (int)Math.Ceiling(thickness * 1.6f + sigma * 2.5f) + 4;
+        // ⚠ σ 不是「厚度的某个比例」——那条定律不存在，是拍出来的。
+        // 它只需要盖住<b>边沿散射斑</b>的峰值：斜程在掠入射处饱和，
+        // 峰值权重 w(0) = 1 - exp(-ρ/cosA_min)，散射斑宽度 ≈ w · k · 光程。
+        // 原来的 0.45×厚度 在缩放 2.0 下算出 11.7 物理像素，
+        // 而整条状态栏才 80 物理像素高——卷积窗口超过条高一半，
+        // 细于它的空间频率全部归零，背后是什么完全认不出。
+        //
+        // ⚠ 这四个常量是<b>着色器里同名量的镜像</b>，改一边必须改另一边，
+        // 否则留边和实际取样范围对不上，边缘会出现一圈拉丝。
+        // ρ 从 0.15 降到 0.05、cosA 下限从 0.08 抬到 0.30：
+        // 边缘散射从 85% 降到约 15%，透镜压出来的结构才留得住；
+        // 混叠改由 mip 预滤波承担（见 EnsureCrop 与主着色器的 SampleGrad）。
+        // ⚠ σ<b>不再跟着光程走</b>。原来它 ∝ bgDist，于是「加强折射」会连带把散射半径推大
+        // ——实测 bgDist 1.4→2.2 时内部条纹保留从 88.6% 掉到 73.6%，
+        // 加强边缘的同时把通透度赔掉了，两个本该独立的东西被绑在了一起。
+        // 抗混叠现在由 mip 预滤波承担（EnsureCrop + SampleGrad），
+        // σ 只剩「材质本身的一点雾感」这一个职责，给个跟厚度成比例的小值即可。
+        const float rho = 0.05f, cosAMin = 0.30f, bgDist = 2.2f;
+        var sigma = Math.Clamp(0.10f * thickness, 1.0f, 3.0f);
+        var pad = (int)Math.Ceiling(thickness * DispReach + sigma * 2.5f) + 4;
         EnsureCrop(Width + pad * 2, Height + pad * 2);
+
+        // ⚠ 必须在 EnsureCrop <b>之后</b>取。尺寸一变 EnsureCrop 会重建这几张中间纹理，
+        // 提前取到的是已经 Dispose 掉的 SRV——那一帧要么黑屏要么直接崩。
+        // 没抓到桌面就用占位纹理，但这一帧照样要画、照样要交还互斥。
+        var srv = _desktopSrv is null ? _blankSrv : _blurSrv;
 
         if (_desktop is not null && _cropRtv is not null)
         {
@@ -584,6 +628,12 @@ internal sealed class GlassSource : IDisposable
             BlurPass(_cropSrv!, _tmpRtv!, new Vector2(1, 0), sigma);
             BlurPass(_tmpSrv!, _blurRtv!, new Vector2(0, 1), sigma);
 
+            // 逐级下采样裁剪图。主着色器的 SampleGrad 靠这条链拿到预滤波结果，
+            // 透镜压缩得再狠也不会闪。
+            // ⚠ 放在模糊之后：那两趟已经把渲染目标换走了，
+            // 这时 _crop 的 0 级不再挂在输出上，生成 mip 才不会和输出绑定打架。
+            _context.GenerateMips(_cropSrv!);
+
             // 统计跑在<b>未模糊</b>的裁剪上：模糊会把对比度抹平，
             // 拿模糊图算出来的 rms 会严重偏低，动态范围压缩就等于没做。
             _context.OMSetRenderTargets(_statsRtv);
@@ -611,7 +661,9 @@ internal sealed class GlassSource : IDisposable
             Ambient = 0.15f,
             Chromatic = chromatic,
             RefractiveIndex = 1.5f,
-            BackgroundDistance = 0.8f,
+            // 虚拟背景面离玻璃底面多远，以厚度计。越远，同样的折射角走出的横向位移越大。
+            // 与上面的 bgDist 必须一致。
+            BackgroundDistance = 2.2f,
             TintAmount = tintAmount,
             Tint = new Vector3(1, 1, 1),
             Lensing = lensing,
@@ -619,7 +671,16 @@ internal sealed class GlassSource : IDisposable
             IsDark = isDark ? 1f : 0f,
             Pad = ShadowPad,
             ShadowAlpha = shadowAlpha,
-            Clarity = clarity
+            LensAmount = lensAmount,
+            MaskX = maskOriginPx.X,
+            MaskY = maskOriginPx.Y,
+            MaskW = _mask is null ? 0f : _maskW,
+            MaskH = _mask is null ? 0f : _maskH,
+            AdaptiveText = adaptiveText && _mask is not null ? 1f : 0f,
+            PolarSoft = polarSoft,
+            MaskGain = maskGain,
+            Clarity = clarity,
+            DimAmount = dimAmount
         };
 
         _mutex.AcquireSync(KeyRenderer, 1000);
@@ -639,6 +700,7 @@ internal sealed class GlassSource : IDisposable
             // 中心是薄平板、光直穿，本来就该清晰；只有边缘倒角处光程长才该散开。
             // 只给模糊图的话，整块都是毛玻璃。
             _context.PSSetShaderResource(2, _desktopSrv is null ? _blankSrv : _cropSrv);
+            _context.PSSetShaderResource(3, _maskSrv ?? _blankSrv);
             _context.PSSetSampler(0, _sampler);
             _context.Draw(3, 0);
             _context.Flush();
@@ -652,6 +714,54 @@ internal sealed class GlassSource : IDisposable
 
         return true;
     }
+
+    /// <summary>
+    /// 交上一张状态栏文字的掩膜（预乘 BGRA，物理像素）。
+    /// </summary>
+    /// <remarks>
+    /// 内容变化是秒级的，不需要每帧传；调用方自己节流。
+    /// 尺寸变了就重建纹理，其余情况只覆盖内容。
+    /// </remarks>
+    public void UpdateTextMask(byte[] data, int w, int h)
+    {
+        if (w < 1 || h < 1 || data.Length < w * h * 4)
+        {
+            return;
+        }
+
+        if (_mask is null || _maskW != w || _maskH != h)
+        {
+            _maskSrv?.Dispose();
+            _mask?.Dispose();
+            _maskW = w;
+            _maskH = h;
+            _mask = _device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)w,
+                Height = (uint)h,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource
+            });
+            _maskSrv = _device.CreateShaderResourceView(_mask);
+        }
+
+        unsafe
+        {
+            fixed (byte* p = data)
+            {
+                _context.UpdateSubresource(_mask!, 0, null, (IntPtr)p, (uint)(w * 4), 0);
+            }
+        }
+    }
+
+    /// <summary>掩膜的物理尺寸。没有就是 0。</summary>
+    public int MaskWidth => _mask is null ? 0 : _maskW;
+
+    public int MaskHeight => _mask is null ? 0 : _maskH;
 
     /// <summary>诊断用：这一帧实际从哪块屏、哪个位置取的背景。</summary>
     public string Geometry { get; private set; } = "";
@@ -782,5 +892,14 @@ internal struct GlassCb
     public float IsDark;
     public float Pad;
     public float ShadowAlpha;
+    public float LensAmount;
+    public float MaskX;
+    public float MaskY;
+    public float MaskW;
+    public float MaskH;
+    public float AdaptiveText;
+    public float PolarSoft;
+    public float MaskGain;
     public float Clarity;
+    public float DimAmount;
 }

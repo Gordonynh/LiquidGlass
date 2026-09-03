@@ -38,7 +38,19 @@ internal static class GlassHlsl
             float  gIsDark;
             float  gPad;          // shadow margin around the pill, device px
             float  gShadowAlpha;  // driven by the backdrop
+            float  gLensAmount;   // displacement as a multiple of the band width
+            // Text mask placement, in pill-local physical px. Scalars only: a float2
+            // appended here could straddle a 16-byte boundary and silently shift
+            // every field after it.
+            float  gMaskX;
+            float  gMaskY;
+            float  gMaskW;
+            float  gMaskH;
+            float  gAdaptiveText; // 0 = off
+            float  gPolarSoft;    // half-width of the light/dark crossover
+            float  gMaskGain;     // undoes the host's fade on the rasterised text
             float  gClarity;      // 1 = clear plate, 0 = frosted
+            float  gDimAmount;    // adaptive dim ceiling on a bright backdrop
         };
 
         Texture2D    gDesktop : register(t0);
@@ -139,10 +151,23 @@ internal static class GlassHlsl
             float2 gCropSpare;
         };
 
+        // Mirror, not clamp, outside the desktop.
+        // The bar is docked flush to the top of the screen, so the outward edge
+        // lens asks for pixels ABOVE y=0 that do not exist. Clamping replicates
+        // row 0 and the whole top rim collapses into one flat smear -- the lens
+        // visibly dies on that edge. Mirroring folds the screen back on itself, so
+        // the rim keeps real structure to bend. It is a fabrication, but the whole
+        // effect is a fabrication; a flat band is the only reading that looks broken.
+        float2 mirrorTo(float2 t)
+        {
+            float2 m = fmod(abs(t), 2.0);
+            return 1.0 - abs(m - 1.0);
+        }
+
         float4 PSCrop(VSOut i) : SV_TARGET
         {
             float2 t = (gCropOrigin + i.uv * gCropSize) / gDeskSize;
-            return gDesktop.SampleLevel(gSampler, t, 0);
+            return gDesktop.SampleLevel(gSampler, mirrorTo(t), 0);
         }
 
         // ---- Backdrop statistics ----
@@ -162,6 +187,14 @@ internal static class GlassHlsl
         // material into frosted acrylic: a flat plate does not diffuse, it
         // transmits. Diffusion belongs where the lens actually bends light.
         Texture2D gSharp : register(t2);
+
+        // The status bar's own text, rasterised by the host and handed to us as a
+        // premultiplied BGRA mask. We need the glyph pixels because Avalonia has no
+        // blend mode that would let text composite against what is under it:
+        // RenderOptions.BitmapBlendingMode only affects DrawImage (a GlyphRun is
+        // untouched by it) and CompositionBlendMode is an unwired enum. So instead
+        // of blending the text, we draw it ourselves, inside the glass.
+        Texture2D gTextMask : register(t3);
 
         float4 PSMain(VSOut i) : SV_TARGET
         {
@@ -234,35 +267,68 @@ internal static class GlassHlsl
             float2 g = sdGradient(p, halfSize, radius);
             float3 n = normalize(float3(g * nCos, max(nSin, 1e-4)));
 
-            // Snell refraction onto a virtual background plane.
-            float glassHeight = thickness * nSin;
-            float eta = 1.0 / max(gRefractiveIndex, 1.01);
-            float3 incident = float3(0, 0, -1);
-            float3 refr = refract(incident, n, eta);
-            if (all(refr == 0.0))
-            {
-                refr = incident;
-            }
-
-            float baseHeight = thickness * gBackgroundDistance;
-            float travel = (glassHeight + baseHeight) / max(0.001, abs(refr.z));
-            float maxDisp = thickness * 1.6;
-            float2 disp = clamp(refr.xy * travel, -maxDisp, maxDisp) * gLensing;
+            // ---- Edge lens: an explicit screen-space remap, NOT Snell ----
+            // Snell through a bevel was tried here and is provably too weak: with
+            // n=1.5 the displacement peaks at 0.23 * band width and can never
+            // exceed the band, so the mapping stays monotonic and the edge always
+            // reads as a soft smear. Measured on a striped chart it bent the
+            // backdrop 1.33x -- "barely there", which is exactly the complaint.
+            //
+            // Apple's is a 2D displacement remap with the amount deliberately set
+            // LARGER than the band, which is why their rim gathers a wide strip of
+            // what sits beside the element into a narrow band. Their filter exposes
+            // exactly two knobs, refraction height (the band) and refraction amount
+            // (the displacement) -- so that is what this models.
+            //
+            // Direction is OUTWARD along the SDF gradient: the rim shows what is
+            // BESIDE the pill, squeezed inward. Sampling inward instead (which is
+            // what honest refraction does) stretches the pill's own backdrop and
+            // measured as magnification, the opposite of the intended read.
+            float band = max(thickness, 1.0);
+            float depth = -sd;                          // how far inside the shape
+            float r = saturate(depth / band);           // 0 at the rim, 1 at band depth
+            // Cubic falloff. A linear ramp spreads the gradient evenly and reads as
+            // a wash; the cube concentrates the bend right against the edge.
+            float fall = pow(1.0 - r, 3.0);
+            // Edge guard: the outermost couple of pixels taper back to zero, so the
+            // sample can never run past the crop and leave a dark fringe.
+            float guard = smoothstep(0.0, 2.5 * max(gScaling, 1.0), depth);
+            float amount = gLensAmount * band * fall * guard;
+            float2 dir = sdGradient(p, halfSize, radius);
+            float2 disp = dir * amount * gLensing;
 
             float2 baseUV = gBarOriginUV + px / gDesktopSize;
             float2 dispUV = disp / gDesktopSize;
 
-            // ---- Scatter, driven by how hard the lens is bending here ----
-            // Where the mapping is the identity (the flat interior) the backdrop
-            // must come through sharp -- that is what a plate of glass does.
-            // Where the lens compresses a wide strip of backdrop into a few pixels
-            // (the rim) that strip has to be low-passed or it aliases; that blur is
-            // also what reads as the thick, dense edge.
-            // A single uniform blur across the whole element is the cheap version:
-            // it destroys every spatial frequency finer than the kernel, so nothing
-            // behind the bar is recognisable and it reads as frosted acrylic.
-            float dispMag = saturate(length(disp) / max(maxDisp, 1e-3));
-            float scatter = lerp(saturate(1.0 - gClarity), 1.0, dispMag);
+            // ---- Scatter: Beer-Lambert over the oblique path ----
+            // nSin is the vertical component of the bevel normal, i.e. cos(alpha).
+            // Straight on in the flat interior (cosA = 1) the ray crosses the least
+            // glass; towards the rim the surface tilts, the path lengthens as
+            // sec(alpha) and the diffused fraction saturates at grazing incidence.
+            //
+            // edgeFade forces it to exactly zero once we are further in than
+            // 0.65 * thickness: the flat interior must be a bit-exact copy of the
+            // backdrop. Any residual haze there is what reads as milkiness.
+            //
+            // Mixing sharp and blurred gives MTF = (1-w) + w*G(f): every spatial
+            // frequency survives, only its contrast drops. That reads as haze, not
+            // as defocus. Blurring the whole element instead zeroes every frequency
+            // finer than the kernel -- nothing behind is recognisable.
+            // secA is capped much sooner than before. The old 0.08 floor let the
+            // rim reach sec = 12.5, i.e. 85% diffuse -- the compressed band was
+            // computed and then immediately smeared into a flat gradient. Measured
+            // on a striped chart the stripe density at the bottom bevel fell to
+            // ZERO: the lensing was there and the blur was erasing it.
+            //
+            // The blur was standing in for anti-aliasing (a lens that squeezes a
+            // wide band into a few pixels undersamples and shimmers). That job now
+            // belongs to the mip chain below, which solves it without destroying
+            // the structure. What is left here is only the material's own haze.
+            float secA = 1.0 / max(nSin, 0.30);
+            float wScat = 1.0 - exp(-0.05 * secA);
+            float edgeFade = smoothstep(0.35, 1.0, w);
+            float floorS = saturate(1.0 - gClarity);
+            float scatter = saturate(floorS + (1.0 - floorS) * wScat * edgeFade);
 
             // Dispersion: red bends more than blue. Physically inverted, reads better.
             float c = gChromatic;
@@ -270,9 +336,17 @@ internal static class GlassHlsl
             float2 uvG = baseUV + dispUV;
             float2 uvB = baseUV + dispUV * (1.0 - c);
 
-            float3 clear = float3(gSharp.Sample(gSampler, uvR).r,
-                                  gSharp.Sample(gSampler, uvG).g,
-                                  gSharp.Sample(gSampler, uvB).b);
+            // Anti-aliasing where the lens compresses: hand the hardware the real
+            // UV footprint and let it pick the mip. ddx/ddy of the displaced UV
+            // measure exactly how much backdrop this pixel covers, so a pixel that
+            // gathers 8 source pixels reads a prefiltered mip instead of aliasing.
+            // Plain Sample() cannot do this -- it would shimmer, which is why the
+            // rim used to be blurred by hand.
+            float2 duvx = ddx(uvG);
+            float2 duvy = ddy(uvG);
+            float3 clear = float3(gSharp.SampleGrad(gSampler, uvR, duvx, duvy).r,
+                                  gSharp.SampleGrad(gSampler, uvG, duvx, duvy).g,
+                                  gSharp.SampleGrad(gSampler, uvB, duvx, duvy).b);
             float3 diffuse = float3(gDesktop.Sample(gSampler, uvR).r,
                                     gDesktop.Sample(gSampler, uvG).g,
                                     gDesktop.Sample(gSampler, uvB).b);
@@ -311,8 +385,9 @@ internal static class GlassHlsl
             float infl = smoothstep(0.0, 0.6, lum) * smoothstep(0.0, 0.4, sat);
             float3 hiColor = lerp(float3(target, target, target), colored, infl);
 
+            // No hardcoded x2 here: gLightIntensity is already the knob.
             float3 rim = hiColor
-                       * (0.7 * total * total * gLightIntensity * 2.0 + 0.4 * gAmbient)
+                       * (0.7 * total * total * gLightIntensity + 0.4 * gAmbient)
                        * rimFactor * thicknessFactor * shape;
 
             // Dark band just inside the bright rim: adjacency is what reads as thickness.
@@ -322,9 +397,19 @@ internal static class GlassHlsl
             // is squeezed toward its own mean so the bar's own text stays legible.
             // p95-p05 is approximated as 3.29*rms; for a roughly normal distribution
             // that is the exact relation, and the clamp makes the error harmless.
+            // Toward the backdrop's OWN mean, never toward black or white.
+            // The floor tracks clarity: one slider, one meaning.
             float spread = max(3.29 * bgRms, 1e-3);
-            float k = clamp(0.34 / spread, 0.55, 1.0);
+            float kFloor = lerp(0.55, 0.95, saturate(gClarity));
+            float k = clamp(0.34 / spread, kFloor, 1.0);
             bg = bgMean + (bg - bgMean) * k;
+
+            // Adaptive dim, and only on a bright backdrop. This is a GAIN, not a
+            // mix toward grey: Michelson contrast is untouched, so what is behind
+            // stays exactly as recognisable, while light foreground text regains
+            // something to sit against. Compressing toward grey would cost both.
+            float dim = gIsDark > 0.5 ? saturate((bgMean - 0.45) / 0.40) : 0.0;
+            bg *= 1.0 - gDimAmount * dim;
 
             // Tint as a luminance-indexed tone map, not a flat overlay:
             // one colour expands into a ramp of tones driven by backdrop brightness.
@@ -334,7 +419,62 @@ internal static class GlassHlsl
             float tlum = dot(tinted, LUMA);
             tinted = lerp(float3(tlum, tlum, tlum), tinted, 1.12);
 
-            float3 col = saturate(tinted + rim - innerShade);
+            // innerShade multiplies instead of subtracting: subtraction clips to
+            // zero on a dark backdrop and kills the shadow detail behind the bar.
+            // Reinhard-style soft clip instead of a hard saturate: on a white
+            // slide the rim would otherwise flat-top into a dead white band.
+            float3 lit = tinted * (1.0 - innerShade) + rim;
+            float peak = max(lit.r, max(lit.g, lit.b));
+            float3 col = saturate(lit / (1.0 + max(peak - 1.0, 0.0)));
+
+            // ---- Adaptive text polarity ----
+            // Per pixel, not per label: the reference is the LOW-PASSED backdrop, so
+            // the polarity field varies on a ~10px scale. At 12pt/2x that is about
+            // half a glyph, which is the point -- one character straddling a bright
+            // and a dark region flips halfway across, exactly like Apple's vibrancy.
+            // Low-passed rather than raw: a single bright 2px stroke in a wallpaper
+            // must not be able to flip one pixel of a letter and speckle the text.
+            if (gAdaptiveText > 0.5 && gMaskW > 0.5)
+            {
+                float2 muv = float2((px.x - gMaskX) / max(gMaskW, 1.0),
+                                    (px.y - gMaskY) / max(gMaskH, 1.0));
+                if (muv.x > 0.0 && muv.x < 1.0 && muv.y > 0.0 && muv.y < 1.0)
+                {
+                    float4 m = gTextMask.SampleLevel(gSampler, muv, 0.0) * gMaskGain;
+                    if (m.a > 0.002)
+                    {
+                        float2 e = 4.0 * max(gScaling, 1.0) / gDesktopSize;
+                        float3 refc = gDesktop.SampleLevel(gSampler, baseUV, 0).rgb * 0.34
+                            + gDesktop.SampleLevel(gSampler, baseUV + float2(e.x, 0), 0).rgb * 0.165
+                            + gDesktop.SampleLevel(gSampler, baseUV - float2(e.x, 0), 0).rgb * 0.165
+                            + gDesktop.SampleLevel(gSampler, baseUV + float2(0, e.y), 0).rgb * 0.165
+                            + gDesktop.SampleLevel(gSampler, baseUV - float2(0, e.y), 0).rgb * 0.165;
+                        refc *= 1.0 - gDimAmount * dim;
+
+                        // WCAG crossover: the luminance whose contrast ratio against
+                        // both black and white is equal. Solving (Y+.05)^2 = 1.05*.05
+                        // gives Y = 0.179128. Deciding on either side of it maximises
+                        // the worst-case contrast, which is the whole point.
+                        float yb = dot(pow(saturate(refc), 2.2),
+                                       float3(0.2126, 0.7152, 0.0722));
+                        float pol = smoothstep(0.179128 - gPolarSoft,
+                                               0.179128 + gPolarSoft, yb);
+
+                        // Keep the glyph's own hue, retarget only its lightness --
+                        // inverting RGB outright would turn a coloured icon into its
+                        // complement, which reads as a bug rather than as contrast.
+                        // Clamp the un-premultiply: an antialiased glyph edge has a
+                        // tiny alpha, and dividing by it amplifies rounding into wild
+                        // colours that fringe every letter.
+                        float3 src = saturate(m.rgb / max(m.a, 0.06));
+                        float ma = saturate(m.a);
+                        float sl = max(dot(src, LUMA), 0.15);
+                        float3 txt = lerp(saturate(src / sl * 0.98),
+                                          saturate(src / sl * 0.09), pol);
+                        col = lerp(col, txt, ma);
+                    }
+                }
+            }
 
             // Glass over shadow, straight alpha. The shadow is pure black, so its
             // colour contribution is zero either way.

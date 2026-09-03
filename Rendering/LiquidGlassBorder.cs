@@ -96,6 +96,260 @@ public class LiquidGlassBorder : Control
 
     private int _frames;
 
+    // ---- 文字自适应反色 ----
+    private Visual? _gridRoot;       // 模板根。玻璃挂到它上面就画在文字之上
+    private Visual? _overlay;        // 通知层。它显形时玻璃必须让位
+    private Visual? _attached;       // 当前挂在哪
+    // 起始就当作「还没验证过」，未验证成功前玻璃一律待在文字下面。
+    // 否则启动瞬间会先盖上去、掩膜判死之后再退回，中间有一秒是空白状态栏。
+    private int _maskMiss = 30;
+
+    private Control? _textHost;      // 文字层（ClassIsland 的 GridContentRoot）
+    private Visual? _textSource;     // 真正拿去光栅化的那一层（它的子节点）
+    private byte[]? _maskBuf;
+    private Point _maskOriginDip;
+    private bool _maskAlive;
+    private float _maskGain = 1f;
+    private double _maskInk;
+
+    /// <summary>
+    /// 找到状态栏画文字的那棵子树。
+    /// </summary>
+    /// <remarks>
+    /// ⚠ 藏起来的和拿去光栅化的<b>必须是两层</b>：
+    /// <c>RenderTargetBitmap.Render(v)</c> 会应用 v <b>自身</b>的 Opacity，
+    /// 在同一个控件上设 0 再去渲染，拿到的必然是一张空图。
+    /// 祖先的 Opacity 不影响它（渲染时该控件就是根），所以藏父、渲子。
+    /// </remarks>
+    private void LocateText()
+    {
+        if (_textHost is not null)
+        {
+            return;
+        }
+
+        Visual? line = this;
+        while (line is not null && line.GetType().Name != "MainWindowLine")
+        {
+            line = line.GetVisualParent();
+        }
+
+        var host = line is null ? null : FindNamed(line, "GridContentRoot");
+        if (host is null || line is null)
+        {
+            return;
+        }
+
+        _gridRoot = FindNamed(line, "GridRoot") ?? line;
+        _overlay = FindNamed(line, "GridOverlay");
+        _textHost = host;
+
+        // 渲染子节点，藏父节点。见 HiddenOpacity 的说明。
+        _textSource = host.GetVisualChildren().FirstOrDefault() ?? (Visual)host;
+
+        var kids = string.Join("/", host.GetVisualChildren()
+            .Take(4).Select(v => v.GetType().Name));
+        Report($"已接上文字层 {host.GetType().Name}"
+               + $"，子节点 [{kids}]，准备自适应反色");
+    }
+
+    private static Control? FindNamed(Visual root, string name)
+    {
+        if (root is Control c && c.Name == name)
+        {
+            return c;
+        }
+
+        foreach (var child in root.GetVisualChildren())
+        {
+            var hit = FindNamed(child, name);
+            if (hit is not null)
+            {
+                return hit;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>把文字层光栅化成掩膜交给着色器。</summary>
+    /// <remarks>
+    /// 内容变化是秒级的，没必要每帧做，所以调用方节流。
+    /// 光栅化尺寸必须用<b>物理像素</b>，和纹理坐标同一套单位。
+    /// </remarks>
+    private void UpdateTextMask(double scaling)
+    {
+        if (_source is null || _textSource is null || _textHost is null)
+        {
+            return;
+        }
+
+        var b = _textSource.Bounds;
+        var w = (int)Math.Ceiling(b.Width * scaling);
+        var h = (int)Math.Ceiling(b.Height * scaling);
+        if (w < 2 || h < 2 || w > 8192 || h > 8192)
+        {
+            return;
+        }
+
+        var need = w * h * 4;
+        if (_maskBuf is null || _maskBuf.Length < need)
+        {
+            _maskBuf = new byte[need];
+        }
+
+        using var rtb = new RenderTargetBitmap(
+            new PixelSize(w, h), new Avalonia.Vector(96 * scaling, 96 * scaling));
+
+        // ⚠ 祖先的透明度会<b>算进</b> RenderTargetBitmap 的结果。
+        // ClassIsland 的 MainWindowLine 在「淡出」状态下 Opacity=0.05
+        // （MainWindowLine.axaml 的 IsLineFaded 样式），于是掩膜里的字只剩 5% 的 alpha，
+        // 看上去就是「只有一根进度条，一个字都没有」。
+        //
+        // 临时把祖先链置 1 再渲染<b>没有用</b>：RTB 取的是已经录制好的绘制数据，
+        // 属性改了要等下一轮才重建。所以只能把这个系数量出来，事后补偿。
+        //
+        // 量化损失可以接受，而且恰好损失在无人看得见的地方：系数不是 1
+        // 只发生在状态栏本身已经淡到 5% 的时候，那时整条都快看不见了；
+        // 正常显示时系数就是 1，掩膜是全质量的。
+        var fade = 1.0;
+        for (Visual? a = _textSource; a is not null; a = a.GetVisualParent())
+        {
+            fade *= a.Opacity;
+        }
+
+        _maskGain = (float)Math.Clamp(1.0 / Math.Max(fade, 0.02), 1.0, 50.0);
+        rtb.Render(_textSource);
+
+        unsafe
+        {
+            fixed (byte* q = _maskBuf)
+            {
+                rtb.CopyPixels(new PixelRect(0, 0, w, h), (IntPtr)q, need, w * 4);
+            }
+        }
+
+        // 排查用：配置目录里放了 dump.on 就把掩膜本身存一张出来。
+        // 掩膜画错了（位置、尺寸、透明度）在最终画面上表现得千奇百怪，
+        // 直接看这张图比反推快得多。
+        if (_frames % 300 == 0 && LiquidGlassSettings.ConfigFolder.Length > 0 &&
+            System.IO.File.Exists(
+                System.IO.Path.Combine(LiquidGlassSettings.ConfigFolder, "dump.on")))
+        {
+            try
+            {
+                rtb.Save(System.IO.Path.Combine(
+                    LiquidGlassSettings.ConfigFolder, $"mask_{w}x{h}.png"));
+                var off = _textSource.TranslatePoint(new Point(0, 0), this) ?? default;
+                var probe = System.Linq.Enumerable.Range(0, w * h)
+                    .Count(k => _maskBuf[k * 4 + 3] > 8);
+                Report($"掩膜 {w}×{h}，有效着墨 {_maskInk:F2}%（判活门限 2%），淡出补偿 {_maskGain:F1}×"
+                       + $"；文字层 {b.Width:F0}×{b.Height:F0} 逻辑"
+                       + $"；相对本控件偏移 ({off.X:F1},{off.Y:F1}) 逻辑"
+                       + $"；本控件 {Bounds.Width:F0}×{Bounds.Height:F0} 逻辑");
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        // ⚠ 掩膜必须<b>自证有内容</b>再启用。
+        // 实测在虚拟 GPU 上 RenderTargetBitmap 能画出形状（进度条画出来了）
+        // 却画不出字形，掩膜里一个字都没有。这种情况下若照样把玻璃盖到文字上，
+        // 状态栏就是一条空白——比不做自适应严重得多。
+        // 所以这里数一遍真正有内容的像素：够多才算这条链活着。
+        var ink = 0;
+        for (var k = 0; k < w * h; k++)
+        {
+            var o = k * 4;
+            if (_maskBuf[o + 3] > 64 &&
+                Math.Max(_maskBuf[o], Math.Max(_maskBuf[o + 1], _maskBuf[o + 2])) > 64)
+            {
+                ink++;
+            }
+        }
+
+        _maskInk = ink * 100.0 / (w * h) * _maskGain;
+        _maskAlive = _maskInk >= 2.0;
+
+        _source.UpdateTextMask(_maskBuf, w, h);
+        _maskOriginDip = _textSource.TranslatePoint(new Point(0, 0), this) ?? default;
+    }
+
+    /// <summary>
+    /// 原文字该不该藏。
+    /// </summary>
+    /// <remarks>
+    /// ⚠ 只有确认整条链活着才藏。GPU 退回 CPU、掩膜没传上去、控件卸载——
+    /// 任何一种情况下都必须把原文字还回来，否则状态栏就是一片空白，
+    /// 而这是比「文字对比度不够」严重得多的故障。
+    /// <para/>
+    /// 用 Opacity 而不是 IsVisible：Opacity=0 仍然参与布局、仍然可命中，
+    /// IsVisible=false 会让 Measure 返回 0，状态栏宽度会跟着塌掉。
+    /// </remarks>
+    /// <summary>
+    /// 把玻璃挂到哪一层。
+    /// </summary>
+    /// <remarks>
+    /// 自适应反色要求玻璃画在<b>文字之上</b>——胶囊内部本来就不透明，
+    /// 盖上去原文字自然就没了，文字由玻璃自己按背景逐像素定黑白重新画出来。
+    /// <para/>
+    /// 之所以不是「把原文字藏起来」：任何让子树透明的手段都会同时把它从
+    /// <see cref="RenderTargetBitmap"/> 里抹掉——Opacity=0 时绘制数据根本不保留，
+    /// 1/255 时祖先透明度又会渗进渲染结果。藏与取是同一棵子树，本质冲突。
+    /// <para/>
+    /// 挂到 <c>GridRoot</c>：它 <c>ClipToBounds=False</c>，投影留边不会被裁；
+    /// 而 <c>ContentClipBorder</c> 带 Clip，挂在它里面会被切掉一圈。
+    /// <para/>
+    /// ⚠ 掩膜一旦拿不到就必须<b>退回到文字下面</b>。玻璃在上、又没有文字，
+    /// 状态栏就是一条空白——这比对比度不够严重得多。
+    /// </remarks>
+    private void Attach(Visual host)
+    {
+        if (ReferenceEquals(_attached, host) || _visual is null)
+        {
+            return;
+        }
+
+        if (_attached is not null)
+        {
+            ElementComposition.SetElementChildVisual(_attached, null);
+        }
+
+        ElementComposition.SetElementChildVisual(host, _visual);
+        _attached = host;
+        Report(ReferenceEquals(host, this) ? "玻璃挂回文字下方" : "玻璃已挂到文字上方");
+    }
+
+    /// <summary>
+    /// 「藏起来」用的透明度：1/255，不是 0。（已不再使用，保留说明备查。）
+    /// </summary>
+    /// <remarks>
+    /// ⚠ 归零不行。实测：第一张掩膜有 58% 的像素有内容，把文字层设成 Opacity=0 之后
+    /// 每一张都是 0.0% —— Avalonia 对完全透明的子树<b>根本不保留绘制数据</b>，
+    /// 而且在同一个 tick 里临时改回 1 也来不及重建（改的只是属性，绘制数据要等下一轮）。
+    /// 现象是状态栏文字整个消失，且不报任何错。
+    /// <para/>
+    /// 1/255 让这棵子树在渲染器眼里仍然是「可见」的，绘制数据照常维护，
+    /// 而屏幕上它对每个像素的贡献不到一个色阶，看不出来。
+    /// </remarks>
+    private const double HiddenOpacity = 1.0 / 255.0;
+
+    private void ApplyTextHiding(bool alive)
+    {
+        if (_textHost is null)
+        {
+            return;
+        }
+
+        var want = alive ? HiddenOpacity : 1.0;
+        if (Math.Abs(_textHost.Opacity - want) > 0.001)
+        {
+            _textHost.Opacity = want;
+        }
+    }
+
+
     protected override async void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
@@ -122,6 +376,7 @@ public class LiquidGlassBorder : Control
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnDetachedFromVisualTree(e);
+        _maskAlive = false;
         _timer?.Stop();
         _timer = null;
         _source?.Dispose();
@@ -159,7 +414,7 @@ public class LiquidGlassBorder : Control
         _surface = compositor.CreateDrawingSurface();
         _visual = compositor.CreateSurfaceVisual();
         _visual.Surface = _surface;
-        ElementComposition.SetElementChildVisual(this, _visual);
+        Attach(this);
 
         // ⚠ 这里的续体跑在合成线程上，不是 UI 线程。
         // 在合成线程上建的 DispatcherTimer 挂在不泵消息的线程上，Tick 永远不来，
@@ -208,7 +463,14 @@ public class LiquidGlassBorder : Control
         // 纹理保持物理分辨率是为了清晰，合成器负责缩到逻辑尺寸。
         _visual.Size = new Vector2(
             (float)(Bounds.Width + padDip * 2), (float)(Bounds.Height + padDip * 2));
-        _visual.Offset = new Vector3((float)-padDip, (float)-padDip, 0);
+
+        // 偏移是相对<b>挂载目标</b>的，不是相对本控件的。
+        // 挂到模板根之后两者不再重合，照旧只减留边会整体错位。
+        var rel = _attached is null || ReferenceEquals(_attached, this)
+            ? new Point(0, 0)
+            : this.TranslatePoint(new Point(0, 0), _attached) ?? new Point(0, 0);
+        _visual.Offset = new Vector3(
+            (float)(rel.X - padDip), (float)(rel.Y - padDip), 0);
 
         var origin = this.TranslatePoint(new Point(0, 0), top) ?? new Point(0, 0);
         var screen = top.PointToScreen(origin);
@@ -229,6 +491,47 @@ public class LiquidGlassBorder : Control
         {
             _source.Capture(screen.X, screen.Y);
 
+            // 文字掩膜：秒级内容，没必要每帧重做。
+            if (Settings.AdaptiveText)
+            {
+                LocateText();
+                if (_frames % 6 == 0)
+                {
+                    try
+                    {
+                        UpdateTextMask(scaling);
+                    }
+                    catch (Exception ex)
+                    {
+                        _maskAlive = false;
+                        Report("文字掩膜失败，改用原文字：" + ex.Message);
+                    }
+                }
+            }
+            else
+            {
+                _maskAlive = false;
+            }
+
+            // 掩膜连着几轮拿不到就退回文字下方，宁可没有自适应也不能让字消失。
+            if (Settings.AdaptiveText && _source.MaskWidth > 0 && _maskAlive)
+            {
+                _maskMiss = 0;
+            }
+            else
+            {
+                _maskMiss++;
+            }
+
+            var above = _maskMiss < 30 && _gridRoot is not null;
+            Attach(above ? _gridRoot! : this);
+
+            // 通知显形时让位：玻璃在文字之上，不退让会把整套通知盖住。
+            // 跟着通知层的透明度做交叉淡入，比硬切干净。
+            _visual.Opacity = _attached is null || ReferenceEquals(_attached, this) || _overlay is null
+                ? 1f
+                : (float)Math.Clamp(1.0 - _overlay.Opacity, 0.0, 1.0);
+
             var radius = (float)Math.Min(Settings.CornerRadius * scaling, h / 2.0);
             if (Settings.RoundToCapsule)
             {
@@ -239,7 +542,11 @@ public class LiquidGlassBorder : Control
                     (float)(Settings.Thickness * scaling), (float)Settings.Lensing,
                     (float)scaling, Settings.IsDark,
                     (float)Settings.Chromatic, (float)Settings.TintAmount,
-                    (float)Settings.ShadowAlpha, (float)Settings.Clarity))
+                    (float)Settings.ShadowAlpha, (float)Settings.Clarity,
+                    (float)Settings.DimAmount, (float)Settings.LensAmount,
+                    new Vector2((float)(_maskOriginDip.X * scaling),
+                                (float)(_maskOriginDip.Y * scaling)),
+                    Settings.AdaptiveText && _maskAlive, (float)Settings.PolarSoft, _maskGain))
             {
                 return;
             }
@@ -266,7 +573,10 @@ public class LiquidGlassBorder : Control
 
 
             // 配置目录里放一个 dump.on 就导出一帧，用来在看不到屏幕时排查观感。
-            if (_frames == 90 && LiquidGlassSettings.ConfigFolder.Length > 0 &&
+            // ⚠ 周期性导出，不是只导第 90 帧。
+            // 启动后头几秒状态栏还在调整宽度、桌面复制也可能还在交上一帧，
+            // 那时导出的一帧和事后截屏对不上，量出来的数会随轮次跳。
+            if (_frames > 0 && _frames % 300 == 0 && LiquidGlassSettings.ConfigFolder.Length > 0 &&
                 System.IO.File.Exists(
                     System.IO.Path.Combine(LiquidGlassSettings.ConfigFolder, "dump.on")))
             {
@@ -301,6 +611,8 @@ public class LiquidGlassBorder : Control
         {
             // GPU 路出问题就整条关掉，退回 CPU 外壳，别把宿主拖下水。
             Report("GPU 折射出错，退回 CPU 外壳：" + ex.Message);
+            _maskAlive = false;
+            Attach(this);
             _gpuFailed = true;
             _timer?.Stop();
             _timer = null;

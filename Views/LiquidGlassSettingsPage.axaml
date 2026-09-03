@@ -65,6 +65,28 @@
                 </controls:SettingsExpander.Footer>
             </controls:SettingsExpander>
 
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE8D2;}"
+                                       Header="文字随背景自动反黑白"
+                                       Description="逐像素判定，一个字跨在明暗交界上时左右两半会各自翻。需要显卡能把文字光栅化，部分机器上不生效——不生效会自动退回普通文字，不会变成空白。">
+                <controls:SettingsExpander.Footer>
+                    <ToggleSwitch IsChecked="{Binding Settings.AdaptiveText, Mode=TwoWay}"/>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE9A9;}"
+                                       Header="边缘扭曲"
+                                       Description="以倒角带宽的倍数计。大于 1 才会把胶囊旁边的内容挤进边缘那道窄带；小于 1 只是一层软渐变。">
+                <controls:SettingsExpander.Footer>
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Slider Width="170" Minimum="0" Maximum="3" TickFrequency="0.1"
+                                IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Value="{Binding Settings.LensAmount, Mode=TwoWay}"/>
+                        <TextBlock VerticalAlignment="Center" MinWidth="54"
+                                   Text="{Binding Settings.LensAmount, StringFormat='{}{0:F1}×'}"/>
+                    </StackPanel>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
             <controls:SettingsExpander IconSource="{ci:FluentIconSource &#xE7E8;}"
                                        Header="两端做成半圆"
                                        Description="状态栏是横条，胶囊比圆角矩形更像那么回事。">
