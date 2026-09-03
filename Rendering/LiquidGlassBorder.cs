@@ -111,6 +111,7 @@ public class LiquidGlassBorder : Control
     private bool _maskAlive;
     private float _maskGain = 1f;
     private double _maskInk;
+    private double _hostScaling = 1;
 
     /// <summary>
     /// 找到状态栏画文字的那棵子树。
@@ -444,9 +445,28 @@ public class LiquidGlassBorder : Control
             return;
         }
 
-        var scaling = top.RenderScaling;
-        var w = (int)Math.Ceiling(Bounds.Width * scaling);
-        var h = (int)Math.Ceiling(Bounds.Height * scaling);
+        // ⚠ 有效缩放必须<b>量出来</b>，不能用 TopLevel.RenderScaling。
+        // RenderScaling 只反映显示器 DPI，<b>不含 ClassIsland 自己的「界面缩放」</b>
+        // ——那是主窗口外面套的一层 LayoutTransformControl + ScaleTransform
+        // （见 MainWindow.axaml 的 RootLayoutTransformControl，绑 Settings.Scale）。
+        //
+        // 界面缩放不等于 1 时，Bounds×RenderScaling 比条子在屏幕上实际覆盖的范围<b>小</b>：
+        // 纹理按小尺寸分配、再被这层变换拉大，于是折射内容整体放大；
+        // 取景窗也跟着偏小，画面看着还往右偏。
+        // 开发机默认 Scale=1，所以这个错在本机永远不会显形——学校那台调大过就中招。
+        //
+        // 拿控件两个角各做一次 PointToScreen，中间经过的所有变换都自动算进去，
+        // 不需要知道有几层、分别是什么。
+        var origin = this.TranslatePoint(new Point(0, 0), top) ?? new Point(0, 0);
+        var far = this.TranslatePoint(new Point(Bounds.Width, Bounds.Height), top) ?? origin;
+        var pTopLeft = top.PointToScreen(origin);
+        var pBottomRight = top.PointToScreen(far);
+
+        var w = Math.Max(2, pBottomRight.X - pTopLeft.X);
+        var h = Math.Max(2, pBottomRight.Y - pTopLeft.Y);
+        var scaling = Bounds.Width > 0.5 ? w / Bounds.Width : top.RenderScaling;
+        _hostScaling = top.RenderScaling;
+
         if (!_source.EnsureTarget(w, h))
         {
             return;
@@ -472,8 +492,7 @@ public class LiquidGlassBorder : Control
         _visual.Offset = new Vector3(
             (float)(rel.X - padDip), (float)(rel.Y - padDip), 0);
 
-        var origin = this.TranslatePoint(new Point(0, 0), top) ?? new Point(0, 0);
-        var screen = top.PointToScreen(origin);
+        var screen = pTopLeft;
 
         // ⚠ 排除标志会被冲掉。实测：设完立刻回读是 17，过一会儿再查就变回 0——
         // ClassIsland 自己在管理窗口特性：MainWindow.UpdateWindowFeatures 会按
@@ -598,7 +617,8 @@ public class LiquidGlassBorder : Control
             {
                 Report($"GPU 折射运行中，已推 {_frames} 帧"
                        + $"；控件 {Bounds.Width:F0}×{Bounds.Height:F0} 逻辑"
-                       + $" → {w}×{h} 物理，缩放 {scaling:F2}"
+                       + $" → {w}×{h} 物理，有效缩放 {scaling:F2}"
+                       + $"（显示器 DPI {_hostScaling:F2}，界面缩放 {scaling / Math.Max(_hostScaling, 0.01):F2}）"
                        + $"；窗口内偏移 ({origin.X:F0},{origin.Y:F0})"
                        + $"；屏幕位置 ({screen.X},{screen.Y})"
                        + $"；宿主不透明度 {HostOpacity():F2}"
