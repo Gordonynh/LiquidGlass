@@ -23,7 +23,7 @@ internal readonly record struct GlassParams(
 /// 液态玻璃外壳的 CPU 渲染。
 /// </summary>
 /// <remarks>
-/// <b>为什么不用着色器。</b>这台机器上的 Skia 能<i>编译</i> SKSL 运行时着色器，
+/// <b>为什么不用着色器。</b>Skia 能<i>编译</i> SKSL 运行时着色器，
 /// 但一<i>绘制</i>就在原生层崩（<c>sk_canvas_draw_rect</c> 抛 SEHException，
 /// 连不带任何 uniform 的最简着色器也崩；同一版 libSkiaSharp 下纯色和渐变都正常）。
 /// 所以这里改成在 CPU 上算。
